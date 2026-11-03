@@ -41,7 +41,7 @@ pipeline {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
-            description: 'Leave empty for DEV. For QA/UAT/PROD, enter the full 40-character DEV Git commit SHA.'
+            description: 'Enter the full 40-character DEV image SHA for QA/UAT/PROD. Leave empty for DEV.'
         )
 
         choice(
@@ -62,25 +62,35 @@ pipeline {
             steps {
                 script {
                     if (params.Environment == 'dev') {
-                        env.RESOLVED_IMAGE_TAG = sh(
-                            script: 'git rev-parse HEAD',
-                            returnStdout: true
-                        ).trim()
-                    } else {
-                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim()
-                    }
+                        echo 'DEV selected. Generating image tag automatically.'
 
-                    if (!env.RESOLVED_IMAGE_TAG) {
-                        error("Image tag is empty for ${params.Environment}")
+                        def gitSha = env.GIT_COMMIT?.trim()
+
+                        if (!gitSha) {
+                            gitSha = sh(
+                                script: 'git rev-parse --verify HEAD',
+                                returnStdout: true
+                            ).trim()
+                        }
+
+                        env.RESOLVED_IMAGE_TAG = gitSha
+
+                        echo "Generated DEV image tag: ${env.RESOLVED_IMAGE_TAG}"
+                    } else {
+                        echo "${params.Environment.toUpperCase()} selected. Reading supplied DEV image tag."
+
+                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim()
+
+                        if (!env.RESOLVED_IMAGE_TAG) {
+                            error("IMAGE_TAG is required for ${params.Environment}. Enter the full 40-character DEV Git commit SHA.")
+                        }
                     }
 
                     if (!(env.RESOLVED_IMAGE_TAG ==~ /[a-fA-F0-9]{40}/)) {
-                        error("Invalid image tag: ${env.RESOLVED_IMAGE_TAG}")
+                        error("Invalid image tag: ${env.RESOLVED_IMAGE_TAG}. Expected a full 40-character Git commit SHA.")
                     }
 
-                    echo "Selected Environment: ${params.Environment}"
-                    echo "Input IMAGE_TAG: ${params.IMAGE_TAG}"
-                    echo "Resolved IMAGE_TAG: ${env.RESOLVED_IMAGE_TAG}"
+                    echo "Resolved image tag: ${env.RESOLVED_IMAGE_TAG}"
                 }
             }
         }
@@ -88,7 +98,7 @@ pipeline {
         stage('Verify Tools and AWS Access') {
             steps {
                 sh '''
-                    set -eu
+                    set -e
 
                     echo "Checking required tools..."
                     git --version
@@ -101,17 +111,14 @@ pipeline {
                     test -f "$DB_DOCKERFILE"
                     test -f "$HELM_CHART_PATH/Chart.yaml"
 
-                    echo "Required tools and files are available."
+                    echo "Checking AWS access..."
                 '''
 
-                script {
-                    withAwsCredentials {
-                        sh '''
-                            set -eu
-                            echo "Checking AWS access..."
-                            aws sts get-caller-identity
-                        '''
-                    }
+                withAwsCredentials {
+                    sh '''
+                        set -e
+                        aws sts get-caller-identity
+                    '''
                 }
             }
         }
@@ -124,8 +131,6 @@ pipeline {
             }
             steps {
                 script {
-                    echo "Building DEV image with tag: ${env.RESOLVED_IMAGE_TAG}"
-
                     buildAndPushImage(
                         env.DB_IMAGE_DEV,
                         env.RESOLVED_IMAGE_TAG
@@ -175,6 +180,10 @@ pipeline {
                 }
             }
             steps {
+                script {
+                    echo "Production promotion requested for image: ${env.RESOLVED_IMAGE_TAG}"
+                }
+
                 input(
                     message: "Promote database image ${env.RESOLVED_IMAGE_TAG} from UAT to PROD?",
                     ok: 'Approve Production Promotion'
@@ -206,12 +215,8 @@ pipeline {
                     def targetImage = getTargetImage(params.Environment)
 
                     if (!env.RESOLVED_IMAGE_TAG?.trim()) {
-                        error("Resolved image tag is empty for ${params.Environment}.")
+                        error('RESOLVED_IMAGE_TAG is empty. Cannot update Helm values.')
                     }
-
-                    echo "Environment: ${params.Environment}"
-                    echo "Image repository: ${targetImage}"
-                    echo "Image tag: ${env.RESOLVED_IMAGE_TAG}"
 
                     withEnv([
                         "VALUES_FILE=${valuesFile}",
@@ -233,8 +238,10 @@ pipeline {
                                 .components.mysql.tag = strenv(RESOLVED_TAG)
                             ' "$VALUES_FILE"
 
-                            echo "Updated database image:"
+                            echo "Updated database image repository:"
                             yq '.components.mysql.image' "$VALUES_FILE"
+
+                            echo "Updated database image tag:"
                             yq '.components.mysql.tag' "$VALUES_FILE"
                         '''
                     }
@@ -251,19 +258,23 @@ pipeline {
                     def namespace = getKubernetesNamespace(params.Environment)
 
                     sh """
-                        set -eu
+                        set -e
 
-                        helm lint '${env.HELM_CHART_PATH}' \
+                        echo "Running Helm lint..."
+
+                        helm lint '${env.HELM_CHART_PATH}' \\
                             -f '${valuesFile}'
 
-                        helm template employee-db \
-                            '${env.HELM_CHART_PATH}' \
-                            -f '${valuesFile}' \
-                            --namespace '${namespace}' \
-                            --set components.frontend.enabled=false \
-                            --set components.backend.enabled=false \
-                            --set components.mysql.enabled=true \
-                            --set ingress.enabled=false \
+                        echo "Rendering Helm templates..."
+
+                        helm template employee-db \\
+                            '${env.HELM_CHART_PATH}' \\
+                            -f '${valuesFile}' \\
+                            --namespace '${namespace}' \\
+                            --set components.frontend.enabled=false \\
+                            --set components.backend.enabled=false \\
+                            --set components.mysql.enabled=true \\
+                            --set ingress.enabled=false \\
                             --debug >/dev/null
 
                         echo "Helm validation successful."
@@ -293,8 +304,7 @@ pipeline {
                             git add "$VALUES_FILE"
 
                             if ! git diff --cached --quiet; then
-                                git commit -m \
-                                    "Update database ${TARGET_ENV} image to ${RESOLVED_TAG}"
+                                git commit -m "Update database ${TARGET_ENV} image to ${RESOLVED_TAG}"
                             else
                                 echo "No Helm values changes detected."
                             fi
@@ -308,7 +318,8 @@ pipeline {
                         )
                     ]) {
                         sh """
-                            set -eu
+                            set -e
+
                             git push origin HEAD:${env.GITOPS_BRANCH}
                         """
                     }
@@ -345,8 +356,8 @@ pipeline {
                             aws sts get-caller-identity
 
                             echo "Configuring EKS access..."
-                            aws eks update-kubeconfig \
-                                --name '${cluster}' \
+                            aws eks update-kubeconfig \\
+                                --name '${cluster}' \\
                                 --region '${env.AWS_REGION}'
 
                             echo "Checking Argo CD namespace..."
@@ -394,6 +405,7 @@ pipeline {
     }
 }
 
+
 // FUNCTION 1: AWS CREDENTIALS
 def withAwsCredentials(Closure body) {
     withCredentials([
@@ -404,27 +416,33 @@ def withAwsCredentials(Closure body) {
     }
 }
 
+
 // FUNCTION 2: LOGIN TO ECR
 def loginToECR() {
     sh '''
-        set -eu
+        set -e
 
         aws ecr get-login-password \
-            --region "$AWS_REGION" |
+            --region "$AWS_REGION" | \
         docker login \
             --username AWS \
             --password-stdin "$ECR_REGISTRY"
     '''
 }
 
+
 // FUNCTION 3: BUILD AND PUSH DEV IMAGE
 def buildAndPushImage(String repository, String imageTag) {
+    if (!imageTag?.trim()) {
+        error('Image tag is empty for DEV. Cannot build the image.')
+    }
+
     withAwsCredentials {
         sh """
-            set -eu
+            set -e
 
-            aws ecr describe-repositories \
-                --region '${env.AWS_REGION}' \
+            aws ecr describe-repositories \\
+                --region '${env.AWS_REGION}' \\
                 --repository-names '${repository}' >/dev/null
         """
 
@@ -433,13 +451,13 @@ def buildAndPushImage(String repository, String imageTag) {
         def imageURI = "${env.ECR_REGISTRY}/${repository}:${imageTag}"
 
         sh """
-            set -eu
+            set -e
 
             echo "Building database image: ${imageURI}"
 
-            docker build \
-                -f '${env.DB_DOCKERFILE}' \
-                -t '${imageURI}' \
+            docker build \\
+                -f '${env.DB_DOCKERFILE}' \\
+                -t '${imageURI}' \\
                 '${env.BUILD_CONTEXT}'
 
             echo "Pushing DEV database image..."
@@ -451,23 +469,32 @@ def buildAndPushImage(String repository, String imageTag) {
     }
 }
 
+
 // FUNCTION 4: PROMOTE IMAGE BETWEEN ENVIRONMENTS
 def promoteImage(String sourceRepository, String targetRepository, String imageTag) {
+    if (!imageTag?.trim()) {
+        error("Image tag is empty for ${params.Environment}.")
+    }
+
+    if (!(imageTag ==~ /[a-fA-F0-9]{40}/)) {
+        error('Invalid image tag. A full 40-character Git commit SHA is required.')
+    }
+
     withAwsCredentials {
         sh """
-            set -eu
+            set -e
 
             echo "Validating source ECR image..."
 
-            aws ecr describe-images \
-                --region '${env.AWS_REGION}' \
-                --repository-name '${sourceRepository}' \
+            aws ecr describe-images \\
+                --region '${env.AWS_REGION}' \\
+                --repository-name '${sourceRepository}' \\
                 --image-ids imageTag='${imageTag}' >/dev/null
 
             echo "Checking target ECR repository..."
 
-            aws ecr describe-repositories \
-                --region '${env.AWS_REGION}' \
+            aws ecr describe-repositories \\
+                --region '${env.AWS_REGION}' \\
                 --repository-names '${targetRepository}' >/dev/null
         """
 
@@ -477,7 +504,7 @@ def promoteImage(String sourceRepository, String targetRepository, String imageT
         def targetImage = "${env.ECR_REGISTRY}/${targetRepository}:${imageTag}"
 
         sh """
-            set -eu
+            set -e
 
             echo "Pulling source image: ${sourceImage}"
             docker pull '${sourceImage}'
@@ -493,16 +520,8 @@ def promoteImage(String sourceRepository, String targetRepository, String imageT
     }
 }
 
-// FUNCTION 5: VALIDATE PROMOTION IMAGE TAG
-def validateImageTag() {
-    def suppliedTag = params.IMAGE_TAG?.trim()
 
-    if (!suppliedTag || !(suppliedTag ==~ /[a-fA-F0-9]{40}/)) {
-        error('QA/UAT/PROD require the full 40-character DEV Git commit SHA in IMAGE_TAG.')
-    }
-}
-
-// FUNCTION 6: SELECT TARGET ECR IMAGE
+// FUNCTION 5: SELECT TARGET ECR IMAGE
 def getTargetImage(String environment) {
     def images = [
         dev : env.DB_IMAGE_DEV,
@@ -520,7 +539,8 @@ def getTargetImage(String environment) {
     return "${env.ECR_REGISTRY}/${repository}"
 }
 
-// FUNCTION 7: SELECT HELM VALUES FILE
+
+// FUNCTION 6: SELECT HELM VALUES FILE
 def getValuesFile(String environment) {
     def files = [
         dev : "${env.HELM_CHART_PATH}/values-dev.yaml",
@@ -536,12 +556,14 @@ def getValuesFile(String environment) {
     return files[environment]
 }
 
-// FUNCTION 8: SELECT EKS CLUSTER
+
+// FUNCTION 7: SELECT EKS CLUSTER
 def getEKSCluster(String environment) {
     return env.EKS_CLUSTER
 }
 
-// FUNCTION 9: SELECT KUBERNETES NAMESPACE
+
+// FUNCTION 8: SELECT KUBERNETES NAMESPACE
 def getKubernetesNamespace(String environment) {
     def namespaces = [
         dev : 'app-dev',
@@ -557,7 +579,8 @@ def getKubernetesNamespace(String environment) {
     return namespaces[environment]
 }
 
-// FUNCTION 10: SELECT ARGO CD MANIFEST
+
+// FUNCTION 9: SELECT ARGO CD MANIFEST
 def getArgoCDManifest(String environment) {
     def manifests = [
         dev : 'ArgoCD/dev/employee-db-dev.yaml',
@@ -573,7 +596,8 @@ def getArgoCDManifest(String environment) {
     return manifests[environment]
 }
 
-// FUNCTION 11: SELECT ARGO CD APPLICATION NAME
+
+// FUNCTION 10: SELECT ARGO CD APPLICATION NAME
 def getArgoCDAppName(String environment) {
     def appNames = [
         dev : 'employee-db-dev',
