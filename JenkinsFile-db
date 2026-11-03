@@ -11,7 +11,7 @@ pipeline {
         AWS_REGION = 'us-east-1'
         AWS_ACCOUNT_ID = '020048087135'
         ECR_REGISTRY = '020048087135.dkr.ecr.us-east-1.amazonaws.com'
-        AWS_CREDENTIALS = 'aws'
+        AWS_CREDENTIALS = 'AWS'
 
         DB_IMAGE_DEV = 'employee-mgm-dev-db'
         DB_IMAGE_QA = 'employee-mgm-qa-db'
