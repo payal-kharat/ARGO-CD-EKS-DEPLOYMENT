@@ -28,7 +28,7 @@ pipeline {
 
         EKS_CLUSTER = 'employee-mgm-dev-cluster'
 
-        IMAGE_TAG = ''
+        RESOLVED_IMAGE_TAG = ''
     }
 
     parameters {
@@ -41,7 +41,7 @@ pipeline {
         string(
             name: 'IMAGE_TAG',
             defaultValue: '',
-            description: 'Full 40-character DEV image commit SHA required for QA/UAT/PROD'
+            description: 'Leave empty for DEV. For QA/UAT/PROD, enter the full 40-character DEV Git commit SHA.'
         )
 
         choice(
@@ -94,16 +94,16 @@ pipeline {
             }
             steps {
                 script {
-                    env.IMAGE_TAG = sh(
+                    env.RESOLVED_IMAGE_TAG = sh(
                         script: 'git rev-parse HEAD',
                         returnStdout: true
                     ).trim()
 
-                    echo "Generated DEV image tag: ${env.IMAGE_TAG}"
+                    echo "Generated DEV image tag: ${env.RESOLVED_IMAGE_TAG}"
 
                     buildAndPushImage(
                         env.DB_IMAGE_DEV,
-                        env.IMAGE_TAG
+                        env.RESOLVED_IMAGE_TAG
                     )
                 }
             }
@@ -119,12 +119,12 @@ pipeline {
                 script {
                     validateImageTag()
 
-                    env.IMAGE_TAG = params.IMAGE_TAG.trim()
+                    env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG.trim()
 
                     promoteImage(
                         env.DB_IMAGE_DEV,
                         env.DB_IMAGE_QA,
-                        env.IMAGE_TAG
+                        env.RESOLVED_IMAGE_TAG
                     )
                 }
             }
@@ -140,12 +140,12 @@ pipeline {
                 script {
                     validateImageTag()
 
-                    env.IMAGE_TAG = params.IMAGE_TAG.trim()
+                    env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG.trim()
 
                     promoteImage(
                         env.DB_IMAGE_QA,
                         env.DB_IMAGE_UAT,
-                        env.IMAGE_TAG
+                        env.RESOLVED_IMAGE_TAG
                     )
                 }
             }
@@ -177,12 +177,12 @@ pipeline {
             }
             steps {
                 script {
-                    env.IMAGE_TAG = params.IMAGE_TAG.trim()
+                    env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG.trim()
 
                     promoteImage(
                         env.DB_IMAGE_UAT,
                         env.DB_IMAGE_PROD,
-                        env.IMAGE_TAG
+                        env.RESOLVED_IMAGE_TAG
                     )
                 }
             }
@@ -194,14 +194,14 @@ pipeline {
                     def valuesFile = getValuesFile(params.Environment)
                     def targetImage = getTargetImage(params.Environment)
 
-                    if (!env.IMAGE_TAG?.trim()) {
-                        error('IMAGE_TAG is empty. Cannot update Helm values.')
+                    if (!env.RESOLVED_IMAGE_TAG?.trim()) {
+                        error('Resolved image tag is empty. Check the DEV build or promotion stage before updating Helm values.')
                     }
 
                     withEnv([
                         "VALUES_FILE=${valuesFile}",
                         "IMAGE_REPOSITORY=${targetImage}",
-                        "IMAGE_TAG=${env.IMAGE_TAG}"
+                        "RESOLVED_TAG=${env.RESOLVED_IMAGE_TAG}"
                     ]) {
                         sh '''
                             set -eu
@@ -216,7 +216,7 @@ pipeline {
 
                             yq -i '
                                 .components.mysql.image = strenv(IMAGE_REPOSITORY) |
-                                .components.mysql.tag = strenv(IMAGE_TAG)
+                                .components.mysql.tag = strenv(RESOLVED_TAG)
                             ' "$VALUES_FILE"
 
                             echo "Updated database image:"
@@ -264,7 +264,7 @@ pipeline {
                     withEnv([
                         "VALUES_FILE=${valuesFile}",
                         "TARGET_ENV=${params.Environment}",
-                        "IMAGE_TAG=${env.IMAGE_TAG}"
+                        "RESOLVED_TAG=${env.RESOLVED_IMAGE_TAG}"
                     ]) {
                         sh '''
                             set -eu
@@ -356,7 +356,7 @@ pipeline {
             Database CI pipeline completed successfully.
 
             Environment: ${params.Environment}
-            Image tag: ${env.IMAGE_TAG}
+            Image tag: ${env.RESOLVED_IMAGE_TAG}
 
             Image has been pushed to the selected ECR repository.
             Helm values have been updated in GitHub.
@@ -484,7 +484,8 @@ def promoteImage(String sourceRepository, String targetRepository, String imageT
 
 // FUNCTION 5: VALIDATE PROMOTION IMAGE TAG
 def validateImageTag() {
-    if (!(params.IMAGE_TAG ==~ /[a-fA-F0-9]{40}/)) {
+    def suppliedTag = params.IMAGE_TAG?.trim()
+    if (!suppliedTag || !(suppliedTag ==~ /[a-fA-F0-9]{40}/)) {
         error(
             'QA/UAT/PROD require the full 40-character DEV Git commit SHA in IMAGE_TAG.'
         )
