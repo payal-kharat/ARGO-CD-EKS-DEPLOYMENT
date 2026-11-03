@@ -1,0 +1,577 @@
+
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+    }
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = '020048087135'
+        ECR_REGISTRY = '020048087135.dkr.ecr.us-east-1.amazonaws.com'
+        AWS_CREDENTIALS = 'aws'
+
+        DB_IMAGE_DEV = 'employee-mgm-dev-db'
+        DB_IMAGE_QA = 'employee-mgm-qa-db'
+        DB_IMAGE_UAT = 'employee-mgm-uat-db'
+        DB_IMAGE_PROD = 'employee-mgm-prod-db'
+
+        GIT_CREDENTIALS = 'github-gitops-credentials'
+        GITOPS_REPO = 'https://github.com/payal-kharat/ARGO-CD-EKS-DEPLOYMENT.git'
+        GITOPS_BRANCH = 'main'
+
+        DB_DOCKERFILE = './db/Dockerfile'
+        BUILD_CONTEXT = './db'
+        HELM_CHART_PATH = './Helm'
+
+        EKS_CLUSTER = 'employee-mgm-dev-cluster'
+
+        IMAGE_TAG = ''
+    }
+
+    parameters {
+        choice(
+            name: 'Environment',
+            choices: ['dev', 'qa', 'uat', 'prod'],
+            description: 'Select target environment'
+        )
+
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: '',
+            description: 'Full 40-character DEV image commit SHA required for QA/UAT/PROD'
+        )
+
+        choice(
+            name: 'REGISTER_ARGOCD_APPLICATION',
+            choices: ['no', 'yes'],
+            description: 'Register the Argo CD Application?'
+        )
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Verify Tools and AWS Access') {
+            steps {
+                sh '''
+                    set -e
+
+                    echo "Checking required tools..."
+                    git --version
+                    docker --version
+                    aws --version
+                    yq --version
+                    helm version
+
+                    echo "Checking required files..."
+                    test -f "$DB_DOCKERFILE"
+                    test -f "$HELM_CHART_PATH/Chart.yaml"
+
+                    echo "Checking AWS access..."
+                '''
+
+                withAwsCredentials {
+                    sh '''
+                        set -e
+                        aws sts get-caller-identity
+                    '''
+                }
+            }
+        }
+
+        stage('DEV - Build and Push Database Image') {
+            when {
+                expression {
+                    params.Environment == 'dev'
+                }
+            }
+            steps {
+                script {
+                    env.IMAGE_TAG = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "Generated DEV image tag: ${env.IMAGE_TAG}"
+
+                    buildAndPushImage(
+                        env.DB_IMAGE_DEV,
+                        env.IMAGE_TAG
+                    )
+                }
+            }
+        }
+
+        stage('QA - Promote DEV Image') {
+            when {
+                expression {
+                    params.Environment == 'qa'
+                }
+            }
+            steps {
+                script {
+                    validateImageTag()
+
+                    env.IMAGE_TAG = params.IMAGE_TAG.trim()
+
+                    promoteImage(
+                        env.DB_IMAGE_DEV,
+                        env.DB_IMAGE_QA,
+                        env.IMAGE_TAG
+                    )
+                }
+            }
+        }
+
+        stage('UAT - Promote QA Image') {
+            when {
+                expression {
+                    params.Environment == 'uat'
+                }
+            }
+            steps {
+                script {
+                    validateImageTag()
+
+                    env.IMAGE_TAG = params.IMAGE_TAG.trim()
+
+                    promoteImage(
+                        env.DB_IMAGE_QA,
+                        env.DB_IMAGE_UAT,
+                        env.IMAGE_TAG
+                    )
+                }
+            }
+        }
+
+        stage('Production Approval') {
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+            steps {
+                script {
+                    validateImageTag()
+                }
+
+                input(
+                    message: "Promote database image ${params.IMAGE_TAG} from UAT to PROD?",
+                    ok: 'Approve Production Promotion'
+                )
+            }
+        }
+
+        stage('PROD - Promote UAT Image') {
+            when {
+                expression {
+                    params.Environment == 'prod'
+                }
+            }
+            steps {
+                script {
+                    env.IMAGE_TAG = params.IMAGE_TAG.trim()
+
+                    promoteImage(
+                        env.DB_IMAGE_UAT,
+                        env.DB_IMAGE_PROD,
+                        env.IMAGE_TAG
+                    )
+                }
+            }
+        }
+
+        stage('Update Helm Values') {
+            steps {
+                script {
+                    def valuesFile = getValuesFile(params.Environment)
+                    def targetImage = getTargetImage(params.Environment)
+
+                    if (!env.IMAGE_TAG?.trim()) {
+                        error('IMAGE_TAG is empty. Cannot update Helm values.')
+                    }
+
+                    withEnv([
+                        "VALUES_FILE=${valuesFile}",
+                        "IMAGE_REPOSITORY=${targetImage}",
+                        "IMAGE_TAG=${env.IMAGE_TAG}"
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            echo "Validating Helm values file..."
+
+                            test -f "$VALUES_FILE"
+
+                            yq -e '.components.mysql' "$VALUES_FILE" >/dev/null
+
+                            echo "Updating database image repository and tag..."
+
+                            yq -i '
+                                .components.mysql.image = strenv(IMAGE_REPOSITORY) |
+                                .components.mysql.tag = strenv(IMAGE_TAG)
+                            ' "$VALUES_FILE"
+
+                            echo "Updated database image:"
+                            yq '.components.mysql.image' "$VALUES_FILE"
+                            yq '.components.mysql.tag' "$VALUES_FILE"
+                        '''
+                    }
+
+                    echo "Helm values updated for ${params.Environment}."
+                }
+            }
+        }
+
+        stage('Validate Helm Chart') {
+            steps {
+                script {
+                    def valuesFile = getValuesFile(params.Environment)
+
+                    sh """
+                        set -e
+
+                        helm lint '${env.HELM_CHART_PATH}' \
+                            -f '${valuesFile}'
+
+                        helm template employee-db \
+                            '${env.HELM_CHART_PATH}' \
+                            -f '${valuesFile}' \
+                            --namespace '${getKubernetesNamespace(params.Environment)}' \
+                            --set components.frontend.enabled=false \
+                            --set components.backend.enabled=false \
+                            --set components.mysql.enabled=true \
+                            --debug >/dev/null
+
+                        echo "Helm validation successful."
+                    """
+                }
+            }
+        }
+
+        stage('Commit and Push Helm Values') {
+            steps {
+                script {
+                    def valuesFile = getValuesFile(params.Environment)
+
+                    withEnv([
+                        "VALUES_FILE=${valuesFile}",
+                        "TARGET_ENV=${params.Environment}",
+                        "IMAGE_TAG=${env.IMAGE_TAG}"
+                    ]) {
+                        sh '''
+                            set -eu
+
+                            git config user.name "Jenkins CI"
+                            git config user.email "jenkins@localhost"
+
+                            git remote set-url origin "$GITOPS_REPO"
+
+                            git add "$VALUES_FILE"
+
+                            if ! git diff --cached --quiet; then
+                                git commit -m \
+                                    "Update database ${TARGET_ENV} image to ${IMAGE_TAG}"
+                            else
+                                echo "No Helm values changes detected."
+                            fi
+                        '''
+                    }
+
+                    withCredentials([
+                        gitUsernamePassword(
+                            credentialsId: env.GIT_CREDENTIALS,
+                            gitToolName: 'Default'
+                        )
+                    ]) {
+                        sh """
+                            set -e
+                            git push origin HEAD:${env.GITOPS_BRANCH}
+                        """
+                    }
+
+                    echo "Helm values pushed to GitHub."
+                }
+            }
+        }
+
+        stage('Register Argo CD Application') {
+            when {
+                expression {
+                    params.REGISTER_ARGOCD_APPLICATION == 'yes'
+                }
+            }
+            steps {
+                echo 'Registering the selected environment Application in Argo CD.'
+
+                script {
+                    def cluster = getEKSCluster(params.Environment)
+                    def manifest = getArgoCDManifest(params.Environment)
+                    def namespace = getKubernetesNamespace(params.Environment)
+                    def appName = getArgoCDAppName(params.Environment)
+
+                    if (!fileExists(manifest)) {
+                        error("Argo CD manifest not found: ${manifest}")
+                    }
+
+                    withAwsCredentials {
+                        sh """
+                            set -eu
+
+                            echo "Checking AWS identity..."
+                            aws sts get-caller-identity
+
+                            echo "Configuring EKS access..."
+                            aws eks update-kubeconfig \
+                                --name '${cluster}' \
+                                --region '${env.AWS_REGION}'
+
+                            echo "Checking Argo CD namespace..."
+                            kubectl get namespace argocd
+
+                            echo "Registering Argo CD Application..."
+                            kubectl apply -f '${manifest}'
+
+                            echo "Verifying Argo CD Application..."
+                            kubectl get application '${appName}' -n argocd
+
+                            echo "Target namespace: ${namespace}"
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo """
+            Database CI pipeline completed successfully.
+
+            Environment: ${params.Environment}
+            Image tag: ${env.IMAGE_TAG}
+
+            Image has been pushed to the selected ECR repository.
+            Helm values have been updated in GitHub.
+            Argo CD will reconcile the deployment when configured.
+            """
+        }
+
+        failure {
+            echo 'Pipeline failed. Check Jenkins Console Output.'
+        }
+
+        always {
+            sh '''
+                docker logout "$ECR_REGISTRY" || true
+            '''
+
+            deleteDir()
+        }
+    }
+}
+
+
+// FUNCTION 1: AWS CREDENTIALS
+def withAwsCredentials(Closure body) {
+    withCredentials([
+        [$class: 'AmazonWebServicesCredentialsBinding',
+         credentialsId: env.AWS_CREDENTIALS]
+    ]) {
+        body()
+    }
+}
+
+
+// FUNCTION 2: LOGIN TO ECR
+def loginToECR() {
+    sh '''
+        set -e
+
+        aws ecr get-login-password \
+            --region "$AWS_REGION" | \
+        docker login \
+            --username AWS \
+            --password-stdin "$ECR_REGISTRY"
+    '''
+}
+
+
+// FUNCTION 3: BUILD AND PUSH DEV IMAGE
+def buildAndPushImage(String repository, String imageTag) {
+    withAwsCredentials {
+        sh """
+            set -e
+
+            aws ecr describe-repositories \
+                --region '${env.AWS_REGION}' \
+                --repository-names '${repository}' >/dev/null
+        """
+
+        loginToECR()
+
+        def imageURI = "${env.ECR_REGISTRY}/${repository}:${imageTag}"
+
+        sh """
+            set -e
+
+            echo "Building database image: ${imageURI}"
+
+            docker build \
+                -f '${env.DB_DOCKERFILE}' \
+                -t '${imageURI}' \
+                '${env.BUILD_CONTEXT}'
+
+            echo "Pushing DEV database image..."
+
+            docker push '${imageURI}'
+        """
+
+        echo "DEV image published: ${imageURI}"
+    }
+}
+
+
+// FUNCTION 4: PROMOTE IMAGE BETWEEN ENVIRONMENTS
+def promoteImage(String sourceRepository, String targetRepository, String imageTag) {
+    withAwsCredentials {
+        sh """
+            set -e
+
+            echo "Validating source ECR image..."
+
+            aws ecr describe-images \
+                --region '${env.AWS_REGION}' \
+                --repository-name '${sourceRepository}' \
+                --image-ids imageTag='${imageTag}' >/dev/null
+
+            echo "Checking target ECR repository..."
+
+            aws ecr describe-repositories \
+                --region '${env.AWS_REGION}' \
+                --repository-names '${targetRepository}' >/dev/null
+        """
+
+        loginToECR()
+
+        def sourceImage = "${env.ECR_REGISTRY}/${sourceRepository}:${imageTag}"
+        def targetImage = "${env.ECR_REGISTRY}/${targetRepository}:${imageTag}"
+
+        sh """
+            set -e
+
+            echo "Pulling source image: ${sourceImage}"
+            docker pull '${sourceImage}'
+
+            echo "Tagging image for target environment..."
+            docker tag '${sourceImage}' '${targetImage}'
+
+            echo "Pushing promoted image..."
+            docker push '${targetImage}'
+        """
+
+        echo "Image promotion completed: ${targetImage}"
+    }
+}
+
+
+// FUNCTION 5: VALIDATE PROMOTION IMAGE TAG
+def validateImageTag() {
+    if (!(params.IMAGE_TAG ==~ /[a-fA-F0-9]{40}/)) {
+        error(
+            'QA/UAT/PROD require the full 40-character DEV Git commit SHA in IMAGE_TAG.'
+        )
+    }
+}
+
+
+// FUNCTION 6: SELECT TARGET ECR IMAGE
+def getTargetImage(String environment) {
+    def images = [
+        dev : env.DB_IMAGE_DEV,
+        qa  : env.DB_IMAGE_QA,
+        uat : env.DB_IMAGE_UAT,
+        prod: env.DB_IMAGE_PROD
+    ]
+
+    def repository = images[environment]
+
+    if (!repository) {
+        error("Invalid environment: ${environment}")
+    }
+
+    return "${env.ECR_REGISTRY}/${repository}"
+}
+
+
+// FUNCTION 7: SELECT HELM VALUES FILE
+def getValuesFile(String environment) {
+    def files = [
+        dev : "${env.HELM_CHART_PATH}/values-dev.yaml",
+        qa  : "${env.HELM_CHART_PATH}/values-qa.yaml",
+        uat : "${env.HELM_CHART_PATH}/values-uat.yaml",
+        prod: "${env.HELM_CHART_PATH}/values-prod.yaml"
+    ]
+
+    if (!files[environment]) {
+        error("Invalid environment: ${environment}")
+    }
+
+    return files[environment]
+}
+
+
+// FUNCTION 8: SELECT EKS CLUSTER
+def getEKSCluster(String environment) {
+    return env.EKS_CLUSTER
+}
+
+
+// FUNCTION 9: SELECT KUBERNETES NAMESPACE
+def getKubernetesNamespace(String environment) {
+    def namespaces = [
+        dev : 'app-dev',
+        qa  : 'app-qa',
+        uat : 'app-uat',
+        prod: 'app-prod'
+    ]
+
+    if (!namespaces[environment]) {
+        error("Invalid environment: ${environment}")
+    }
+
+    return namespaces[environment]
+}
+
+
+// FUNCTION 10: SELECT ARGO CD MANIFEST
+def getArgoCDManifest(String environment) {
+    def manifests = [
+        dev : 'ArgoCD/dev/employee-db-dev.yaml',
+        qa  : 'ArgoCD/qa/employee-db-qa.yaml',
+        uat : 'ArgoCD/uat/employee-db-uat.yaml',
+        prod: 'ArgoCD/prod/employee-db-prod.yaml'
+    ]
+
+    return manifests[environment]
+}
+
+
+// FUNCTION 11: SELECT ARGO CD APPLICATION NAME
+def getArgoCDAppName(String environment) {
+    def appNames = [
+        dev : 'employee-db-dev',
+        qa  : 'employee-db-qa',
+        uat : 'employee-db-uat',
+        prod: 'employee-db-prod'
+    ]
+
+    return appNames[environment]
+}
