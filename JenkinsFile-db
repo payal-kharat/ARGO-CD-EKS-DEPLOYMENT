@@ -55,42 +55,70 @@ pipeline {
         stage('Checkout') {
             steps {
                 checkout scm
+
+                sh '''
+                    set -e
+
+                    echo "======================================"
+                    echo "Verifying Git checkout"
+                    echo "======================================"
+
+                    echo "Workspace:"
+                    pwd
+
+                    echo "Git repository:"
+                    git rev-parse --show-toplevel
+
+                    echo "Current commit:"
+                    git rev-parse HEAD
+
+                    echo "Commit SHA length:"
+                    git rev-parse HEAD | wc -c
+
+                    echo "Checking required project files:"
+                    test -f ./db/Dockerfile
+                    test -f ./Helm/Chart.yaml
+
+                    echo "Git checkout verification completed."
+                '''
             }
         }
 
         stage('Resolve Image Tag') {
             steps {
                 script {
+                    String resolvedTag = ''
+
                     if (params.Environment == 'dev') {
                         echo 'DEV selected. Generating image tag automatically.'
 
-                        def gitSha = env.GIT_COMMIT?.trim()
+                        resolvedTag = sh(
+                            script: 'git rev-parse --verify HEAD',
+                            returnStdout: true
+                        ).trim()
 
-                        if (!gitSha) {
-                            gitSha = sh(
-                                script: 'git rev-parse --verify HEAD',
-                                returnStdout: true
-                            ).trim()
-                        }
-
-                        env.RESOLVED_IMAGE_TAG = gitSha
-
-                        echo "Generated DEV image tag: ${env.RESOLVED_IMAGE_TAG}"
+                        echo "Generated DEV Git SHA: ${resolvedTag}"
                     } else {
-                        echo "${params.Environment.toUpperCase()} selected. Reading supplied DEV image tag."
+                        echo "${params.Environment.toUpperCase()} selected."
 
-                        env.RESOLVED_IMAGE_TAG = params.IMAGE_TAG?.trim()
+                        resolvedTag = params.IMAGE_TAG?.trim() ?: ''
 
-                        if (!env.RESOLVED_IMAGE_TAG) {
+                        if (resolvedTag.isEmpty()) {
                             error("IMAGE_TAG is required for ${params.Environment}. Enter the full 40-character DEV Git commit SHA.")
                         }
                     }
 
-                    if (!(env.RESOLVED_IMAGE_TAG ==~ /[a-fA-F0-9]{40}/)) {
-                        error("Invalid image tag: ${env.RESOLVED_IMAGE_TAG}. Expected a full 40-character Git commit SHA.")
+                    if (!(resolvedTag ==~ /[a-fA-F0-9]{40}/)) {
+                        error("Invalid image tag: '${resolvedTag}'. Expected a full 40-character Git commit SHA.")
                     }
 
+                    env.RESOLVED_IMAGE_TAG = resolvedTag
+
+                    echo "======================================"
+                    echo "IMAGE TAG RESOLUTION SUCCESSFUL"
+                    echo "Environment: ${params.Environment}"
                     echo "Resolved image tag: ${env.RESOLVED_IMAGE_TAG}"
+                    echo "======================================"
                 }
             }
         }
@@ -101,6 +129,7 @@ pipeline {
                     set -e
 
                     echo "Checking required tools..."
+
                     git --version
                     docker --version
                     aws --version
@@ -108,15 +137,18 @@ pipeline {
                     helm version
 
                     echo "Checking required files..."
+
                     test -f "$DB_DOCKERFILE"
                     test -f "$HELM_CHART_PATH/Chart.yaml"
 
-                    echo "Checking AWS access..."
+                    echo "Required tools and files verified."
                 '''
 
                 withAwsCredentials {
                     sh '''
                         set -e
+
+                        echo "Checking AWS identity..."
                         aws sts get-caller-identity
                     '''
                 }
@@ -131,9 +163,15 @@ pipeline {
             }
             steps {
                 script {
+                    String imageTag = env.RESOLVED_IMAGE_TAG?.trim() ?: ''
+
+                    if (imageTag.isEmpty()) {
+                        error('Resolved DEV image tag is empty. Cannot build the image.')
+                    }
+
                     buildAndPushImage(
                         env.DB_IMAGE_DEV,
-                        env.RESOLVED_IMAGE_TAG
+                        imageTag
                     )
                 }
             }
@@ -147,10 +185,12 @@ pipeline {
             }
             steps {
                 script {
+                    String imageTag = env.RESOLVED_IMAGE_TAG?.trim() ?: ''
+
                     promoteImage(
                         env.DB_IMAGE_DEV,
                         env.DB_IMAGE_QA,
-                        env.RESOLVED_IMAGE_TAG
+                        imageTag
                     )
                 }
             }
@@ -164,10 +204,12 @@ pipeline {
             }
             steps {
                 script {
+                    String imageTag = env.RESOLVED_IMAGE_TAG?.trim() ?: ''
+
                     promoteImage(
                         env.DB_IMAGE_QA,
                         env.DB_IMAGE_UAT,
-                        env.RESOLVED_IMAGE_TAG
+                        imageTag
                     )
                 }
             }
@@ -199,10 +241,12 @@ pipeline {
             }
             steps {
                 script {
+                    String imageTag = env.RESOLVED_IMAGE_TAG?.trim() ?: ''
+
                     promoteImage(
                         env.DB_IMAGE_UAT,
                         env.DB_IMAGE_PROD,
-                        env.RESOLVED_IMAGE_TAG
+                        imageTag
                     )
                 }
             }
@@ -211,22 +255,25 @@ pipeline {
         stage('Update Helm Values') {
             steps {
                 script {
-                    def valuesFile = getValuesFile(params.Environment)
-                    def targetImage = getTargetImage(params.Environment)
+                    String imageTag = env.RESOLVED_IMAGE_TAG?.trim() ?: ''
 
-                    if (!env.RESOLVED_IMAGE_TAG?.trim()) {
+                    if (imageTag.isEmpty()) {
                         error('RESOLVED_IMAGE_TAG is empty. Cannot update Helm values.')
                     }
+
+                    def valuesFile = getValuesFile(params.Environment)
+                    def targetImage = getTargetImage(params.Environment)
 
                     withEnv([
                         "VALUES_FILE=${valuesFile}",
                         "IMAGE_REPOSITORY=${targetImage}",
-                        "RESOLVED_TAG=${env.RESOLVED_IMAGE_TAG}"
+                        "RESOLVED_TAG=${imageTag}"
                     ]) {
                         sh '''
                             set -eu
 
                             echo "Validating Helm values file..."
+
                             test -f "$VALUES_FILE"
 
                             yq -e '.components.mysql' "$VALUES_FILE" >/dev/null
@@ -286,12 +333,18 @@ pipeline {
         stage('Commit and Push Helm Values') {
             steps {
                 script {
+                    String imageTag = env.RESOLVED_IMAGE_TAG?.trim() ?: ''
+
+                    if (imageTag.isEmpty()) {
+                        error('RESOLVED_IMAGE_TAG is empty. Cannot commit Helm values.')
+                    }
+
                     def valuesFile = getValuesFile(params.Environment)
 
                     withEnv([
                         "VALUES_FILE=${valuesFile}",
                         "TARGET_ENV=${params.Environment}",
-                        "RESOLVED_TAG=${env.RESOLVED_IMAGE_TAG}"
+                        "RESOLVED_TAG=${imageTag}"
                     ]) {
                         sh '''
                             set -eu
@@ -356,6 +409,7 @@ pipeline {
                             aws sts get-caller-identity
 
                             echo "Configuring EKS access..."
+
                             aws eks update-kubeconfig \\
                                 --name '${cluster}' \\
                                 --region '${env.AWS_REGION}'
@@ -435,6 +489,10 @@ def loginToECR() {
 def buildAndPushImage(String repository, String imageTag) {
     if (!imageTag?.trim()) {
         error('Image tag is empty for DEV. Cannot build the image.')
+    }
+
+    if (!(imageTag ==~ /[a-fA-F0-9]{40}/)) {
+        error('Invalid DEV image tag. Expected a full 40-character Git commit SHA.')
     }
 
     withAwsCredentials {
