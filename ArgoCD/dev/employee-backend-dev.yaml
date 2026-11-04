@@ -28,7 +28,7 @@ spec:
         - name: storageClass.enabled
           value: "false"
   destination:
-    server: https://YOUR-EKS-API-ENDPOINT
+    server: YOUR_ACTUAL_EKS_API_ENDPOINT
     namespace: app-dev
   syncPolicy:
     automated:
