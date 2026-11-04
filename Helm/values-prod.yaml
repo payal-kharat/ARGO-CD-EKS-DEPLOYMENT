@@ -101,10 +101,10 @@ secret:
   enabled: true
   name: mysql-secret
   stringData:
-    MYSQL_ROOT_PASSWORD: ""
-    MYSQL_DATABASE: ""
-    MYSQL_USER: ""
-    MYSQL_PASSWORD: ""
+    MYSQL_ROOT_PASSWORD: cm9vdHBhc3N3b3Jk
+    MYSQL_DATABASE: ZW1wbG95ZWVfZGI=
+    MYSQL_USER: ZW1wbG95ZWVfdXNlcg==
+    MYSQL_PASSWORD: ZW1wbG95ZWUxMjM=
 
 storageClass:
   enabled: true
