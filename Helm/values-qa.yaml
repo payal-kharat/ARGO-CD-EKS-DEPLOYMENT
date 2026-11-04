@@ -1,4 +1,4 @@
-
+# 
 components:
   frontend:
     enabled: true
@@ -13,7 +13,6 @@ components:
       type: ClusterIP
       port: 80
     env: []
-
   backend:
     enabled: true
     deploymentName: backend
@@ -52,13 +51,12 @@ components:
           secretKeyRef:
             name: mysql-secret
             key: MYSQL_DATABASE
-
   mysql:
     enabled: true
     deploymentName: mysql
     replicas: 1
-    image: ""
-    tag: ""
+    image: "020048087135.dkr.ecr.us-east-1.amazonaws.com/employee-mgm-qa-db"
+    tag: "b9c7e5440e5085a415837913962862cf3e6f6408"
     containerPort: 3306
     persistence:
       existingClaim: mysql-pvc
@@ -89,14 +87,12 @@ components:
           secretKeyRef:
             name: mysql-secret
             key: MYSQL_PASSWORD
-
 configMap:
   enabled: true
   name: employee-cm
   data:
     DB_HOST: mysql
     DB_PORT: "3306"
-
 secret:
   enabled: true
   name: mysql-secret
@@ -105,7 +101,6 @@ secret:
     MYSQL_DATABASE: ""
     MYSQL_USER: ""
     MYSQL_PASSWORD: ""
-
 storageClass:
   enabled: true
   name: ebs-gp3
@@ -114,7 +109,6 @@ storageClass:
   parameters:
     type: gp3
     fsType: ext4
-
 ingress:
   enabled: true
   name: employee-management-ingress
