@@ -4,8 +4,8 @@ components:
     enabled: true
     deploymentName: frontend
     replicas: 1
-    image: ""
-    tag: ""
+    image: "020048087135.dkr.ecr.us-east-1.amazonaws.com/employee-mgm-dev-frontend"
+    tag: "DEV-9e9d822"
     containerPort: 80
     service:
       enabled: true
