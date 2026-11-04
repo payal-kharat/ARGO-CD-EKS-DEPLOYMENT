@@ -1,46 +1,38 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
-
 metadata:
   name: employee-backend-dev
   namespace: argocd
-
 spec:
   project: default
-
   source:
     repoURL: https://github.com/payal-kharat/ARGO-CD-EKS-DEPLOYMENT.git
     targetRevision: main
     path: Helm
-
     helm:
       valueFiles:
         - values-dev.yaml
-
-  parameters:
-  - name: components.frontend.enabled
-    value: "false"
-  - name: components.backend.enabled
-    value: "true"
-  - name: components.mysql.enabled
-    value: "false"
-  - name: configMap.enabled
-    value: "false"
-  - name: secret.enabled
-    value: "false"
-  - name: ingress.enabled
-    value: "false"
-  - name: storageClass.enabled
-    value: "false"
-
+      parameters:
+        - name: components.frontend.enabled
+          value: "false"
+        - name: components.backend.enabled
+          value: "true"
+        - name: components.mysql.enabled
+          value: "false"
+        - name: configMap.enabled
+          value: "false"
+        - name: secret.enabled
+          value: "false"
+        - name: ingress.enabled
+          value: "false"
+        - name: storageClass.enabled
+          value: "false"
   destination:
-    server: https://16F632D4E152601EAF874095218B2543.gr7.us-east-1.eks.amazonaws.com
+    server: https://YOUR-EKS-API-ENDPOINT
     namespace: app-dev
-
   syncPolicy:
     automated:
       prune: true
       selfHeal: true
-
     syncOptions:
       - CreateNamespace=true
