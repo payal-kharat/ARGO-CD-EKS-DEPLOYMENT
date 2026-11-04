@@ -18,11 +18,11 @@ spec:
         - values-dev.yaml
 
       parameters:
-        - name: frontend.enabled
+        - name: components.frontend.enabled
           value: "false"
-        - name: backend.enabled
+        - name: components.backend.enabled
           value: "true"
-        - name: mysql.enabled
+        - name: components.mysql.enabled
           value: "false"
         - name: configMap.enabled
           value: "false"
