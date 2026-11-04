@@ -28,7 +28,7 @@ spec:
         - name: storageClass.enabled
           value: "false"
   destination:
-    server: YOUR_ACTUAL_EKS_API_ENDPOINT
+    server: https://16F632D4E152601EAF874095218B2543.gr7.us-east-1.eks.amazonaws.com
     namespace: app-dev
   syncPolicy:
     automated:
