@@ -1,3 +1,4 @@
+
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -25,6 +26,8 @@ spec:
           value: "true"
         - name: ingress.enabled
           value: "false"
+        - name: storageClass.enabled
+          value: "true"
   destination:
     server: https://16F632D4E152601EAF874095218B2543.gr7.us-east-1.eks.amazonaws.com
     namespace: app-dev

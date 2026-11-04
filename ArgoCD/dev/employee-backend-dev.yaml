@@ -17,17 +17,21 @@ spec:
       valueFiles:
         - values-dev.yaml
 
-      parameters:
-        - name: components.frontend.enabled
-          value: "false"
-        - name: components.backend.enabled
-          value: "true"
-        - name: components.mysql.enabled
-          value: "false"
-        - name: configMap.enabled
-          value: "false"
-        - name: secret.enabled
-          value: "false"
+  parameters:
+  - name: components.frontend.enabled
+    value: "false"
+  - name: components.backend.enabled
+    value: "true"
+  - name: components.mysql.enabled
+    value: "false"
+  - name: configMap.enabled
+    value: "false"
+  - name: secret.enabled
+    value: "false"
+  - name: ingress.enabled
+    value: "false"
+  - name: storageClass.enabled
+    value: "false"
 
   destination:
     server: https://16F632D4E152601EAF874095218B2543.gr7.us-east-1.eks.amazonaws.com
