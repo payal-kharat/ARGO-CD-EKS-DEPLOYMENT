@@ -18,7 +18,7 @@ components:
     deploymentName: backend
     replicas: 1
     image: "020048087135.dkr.ecr.us-east-1.amazonaws.com/employee-mgm-dev-backend"
-    tag: "58b1ef65d446bd9bb472996b291ed87a223c59d5"
+    tag: "c2a626f4a676af679fb1b13e62d65e3cef58a47a"
     containerPort: 5000
     service:
       enabled: true
